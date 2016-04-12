@@ -377,6 +377,8 @@ Socket.prototype.onOpen = function () {
  * @api private
  */
 
+var nping = 0;
+var pinged = 0;
 Socket.prototype.onPacket = function (packet) {
   if ('opening' == this.readyState || 'open' == this.readyState) {
     debug('socket receive: type "%s", data "%s"', packet.type, packet.data);
@@ -392,7 +394,17 @@ Socket.prototype.onPacket = function (packet) {
         break;
 
       case 'pong':
-        this.setPing();
+        if (nping == 0) {
+          this.setPing();
+          break;
+        } else {
+          pinged++;
+          if (pinged <= nping) {
+            this.setPing();
+          } else {
+            console.log("no more ping, pinged", pinged);
+          }
+        }
         break;
 
       case 'error':
@@ -4078,59 +4090,102 @@ function $(id){ return document.getElementById(id); }
 
 // chart
 
-var smoothie;
-var time;
+function connectAndRender(id) {
+  var smoothie;
+  var time;
 
-function render(){
-  if (smoothie) smoothie.stop();
-  $('chart').width = document.body.clientWidth;
-  smoothie = new SmoothieChart();
-  smoothie.streamTo($('chart'), 1000);
-  time = new TimeSeries();
-  smoothie.addTimeSeries(time, {
-    strokeStyle: 'rgb(255, 0, 0)',
-    fillStyle: 'rgba(255, 0, 0, 0.4)',
-    lineWidth: 2
+  function render(id){
+    if (smoothie) smoothie.stop();
+    smoothie = new SmoothieChart();
+    smoothie.streamTo($(id), 1000);
+    time = new TimeSeries();
+    smoothie.addTimeSeries(time, {
+      strokeStyle: 'rgb(255, 0, 0)',
+      fillStyle: 'rgba(255, 0, 0, 0.4)',
+      lineWidth: 2
+    });
+  }
+
+  // socket
+  var socket = new eio.Socket({transports:["polling", "websocket"]});
+  var last;
+  var sendBuf = false;
+  var buf = new ArrayBuffer(2);
+  var ab = new Uint8Array(buf, 0, 2);
+  ab.set([1,2]);
+  function send(){
+    if (sendBuf) {
+      socket.send(buf);
+      sendBuf = false;
+    } else {
+      socket.send('ping');
+      sendBuf = true;
+    }
+    last = new Date;
+    //$(id+'transport').innerHTML = socket.transport.name;
+  }
+  socket.on('open', function(){
+    if ($(id).getContext) {
+      render(id);
+      window.onresize = render;
+    }
+    send();
+  });
+  socket.on('close', function(){
+    $(id+'container').style.backgroundColor = 'red';
+    console.log(id, "was closed");
+
+    if (smoothie) smoothie.stop();
+  });
+  socket.on('message', function(msg){
+    var latency = new Date - last;
+    var e = $(id);
+    var ok = e.ok;
+    var latencyGood = latency < 100;
+    var showGoodOrBadOnly = false;
+
+    if (showGoodOrBadOnly) {
+      if (latencyGood) {
+        if (!ok) {
+          e.ok = true;
+          $(id+'latency').innerHTML = 'ok';
+        }
+      } else {
+        if (ok) {
+          e.ok = false;
+        }
+        $(id+'latency').innerHTML = latency + 'ms';
+      }
+    } else {
+      $(id+'latency').innerHTML = latency + 'ms';
+    }
+
+    if (time) time.append(+new Date, latency);
+    setTimeout(send, 100);
   });
 }
-
-// socket
-var socket = new eio.Socket({transports:["polling", "websocket"]});
-var last;
-var sendBuf = false;
-var buf = new ArrayBuffer(2);
-var ab = new Uint8Array(buf, 0, 2);
-ab.set([1,2]);
-function send(){
-  if (sendBuf) {
-    socket.send(buf);
-    sendBuf = false;
-  } else {
-    socket.send('ping');
-    sendBuf = true;
-  }
-  last = new Date;
-  $('transport').innerHTML = socket.transport.name;
+var chart
+  , id
+  , div
+  , ncharts = 60
+  ;
+for (i = 1; i <= ncharts; i++) {
+  id = 'chart' + i;
+  div = document.createElement("div");
+  div.setAttribute('id', id + 'container');
+  div.innerHTML = '<div>'+i+': <span id="'+id+'latency"></span></div>';
+  chart = document.createElement('canvas');
+  chart.setAttribute('id', id);
+  chart.width = 100;
+  chart.height = 34;
+  div.appendChild(chart);
+  div.setAttribute('style', 'float:left; border-width: 0 1px 0 1px; border-style: solid; border-color:white;');
+  document.body.appendChild(div);
 }
-socket.on('open', function(){
-  if ($('chart').getContext) {
-    render();
-    window.onresize = render;
-  }
-  send();
-});
-socket.on('close', function(){
-  console.log("closed");
-  if (smoothie) smoothie.stop();
-  $('transport').innerHTML = '(disconnected)';
-});
-socket.on('message', function(msg){
-  console.log(msg);
-  var latency = new Date - last;
-  $('latency').innerHTML = latency + 'ms';
-  if (time) time.append(+new Date, latency);
-  setTimeout(send, 100);
-});
+for (i = 1; i <= ncharts; i++) {
+  id = 'chart' + i;
+  connectAndRender(id);
+}
 
 },{"engine.io-client":1,"smoothie":28}]},{},[29])
 

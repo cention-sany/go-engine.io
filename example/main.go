@@ -37,10 +37,12 @@ func main() {
 						return
 					}
 					r.Close()
-					if t == engineio.MessageText {
-						log.Println(t, string(b))
-					} else {
-						log.Println(t, hex.EncodeToString(b))
+					if false {
+						if t == engineio.MessageText {
+							log.Println(t, string(b))
+						} else {
+							log.Println(t, hex.EncodeToString(b))
+						}
 					}
 					w, err := conn.NextWriter(t)
 					if err != nil {
