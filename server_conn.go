@@ -124,11 +124,20 @@ func (c *serverConn) NextReader() (MessageType, io.ReadCloser, error) {
 	if c.getState() == stateClosed {
 		return MessageBinary, nil, io.EOF
 	}
-	ret := <-c.readerChan
-	if ret == nil {
-		return MessageBinary, nil, io.EOF
+
+	for {
+		select {
+		case ret := <-c.readerChan:
+			if ret == nil {
+				return MessageBinary, nil, io.EOF
+			}
+			return MessageType(ret.MessageType()), ret, nil
+		case <-time.After(3 * time.Minute):
+			if c.getState() != stateNormal {
+				return MessageBinary, nil, io.EOF
+			}
+		}
 	}
-	return MessageType(ret.MessageType()), ret, nil
 }
 
 func (c *serverConn) NextWriter(t MessageType) (io.WriteCloser, error) {
