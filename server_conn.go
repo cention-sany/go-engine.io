@@ -375,7 +375,12 @@ func (c *serverConn) pingLoop() {
 			lastTry = lastPing
 			pingTimedOut.Reset(c.pingTimeout)
 		case <-time.After(c.pingInterval - tryDiff):
+			if c.getState() == stateUpgrading {
+				c.Close()
+				return
+			}
 			c.writerLocker.Lock()
+
 			if w, _ := c.getCurrent().NextWriter(message.MessageText, parser.PING); w != nil {
 				writer := newConnWriter(w, &c.writerLocker)
 				writer.Close()
@@ -384,7 +389,8 @@ func (c *serverConn) pingLoop() {
 			}
 			lastTry = time.Now()
 		case <-pingTimedOut.C:
-			if c.getState() == stateNormal {
+			switch c.getState() {
+			case stateNormal, stateUpgrading:
 				c.Close()
 				return
 			}
