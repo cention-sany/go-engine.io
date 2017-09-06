@@ -1,12 +1,15 @@
 package engineio
 
 import (
+	"bytes"
+	"container/list"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/googollee/go-engine.io/message"
@@ -62,6 +65,24 @@ const (
 	stateClosed
 )
 
+type pendingWriter struct {
+	*bytes.Buffer
+	t       MessageType
+	canRead atomic.Value
+}
+
+func newPendingWriter(t MessageType) *pendingWriter {
+	return &pendingWriter{
+		Buffer: new(bytes.Buffer),
+		t:      t,
+	}
+}
+
+func (p *pendingWriter) Close() error {
+	p.canRead.Store(true)
+	return nil
+}
+
 type serverConn struct {
 	id              string
 	request         *http.Request
@@ -78,6 +99,7 @@ type serverConn struct {
 	pingTimeout     time.Duration
 	pingInterval    time.Duration
 	pingChan        chan bool
+	pendingList     *list.List
 }
 
 var InvalidError = errors.New("invalid transport")
@@ -140,18 +162,22 @@ func (c *serverConn) NextReader() (MessageType, io.ReadCloser, error) {
 	}
 }
 
+func (c *serverConn) newPW(t MessageType) io.WriteCloser {
+	if c.pendingList == nil {
+		c.pendingList = list.New()
+	}
+	pw := newPendingWriter(t)
+	c.pendingList.PushBack(pw)
+	return pw
+}
+
 func (c *serverConn) NextWriter(t MessageType) (io.WriteCloser, error) {
 	switch c.getState() {
 	case stateUpgrading:
-		for i := 0; i < 30; i++ {
-			time.Sleep(50 * time.Millisecond)
-			if c.getState() != stateUpgrading {
-				break
-			}
-		}
-		if c.getState() == stateUpgrading {
-			return nil, fmt.Errorf("upgrading")
-		}
+		c.writerLocker.Lock()
+		pw := c.newPW(t)
+		c.writerLocker.Unlock()
+		return pw, nil
 	case stateNormal:
 	default:
 		return nil, io.EOF
@@ -164,6 +190,31 @@ func (c *serverConn) NextWriter(t MessageType) (io.WriteCloser, error) {
 	}
 	writer := newConnWriter(ret, &c.writerLocker)
 	return writer, err
+}
+
+func (c *serverConn) clearPendingWriter() error {
+	c.writerLocker.Lock()
+	if c.pendingList == nil || c.pendingList.Len() <= 0 {
+		c.writerLocker.Unlock()
+		return nil
+	}
+	ct := c.getCurrent()
+	for e := c.pendingList.Front(); e != nil; e = c.pendingList.Front() {
+		pw, _ := e.Value.(*pendingWriter)
+		if v := pw.canRead.Load(); v == nil {
+			continue
+		}
+		ret, err := ct.NextWriter(message.MessageType(pw.t), parser.MESSAGE)
+		if err != nil {
+			c.writerLocker.Unlock()
+			return err
+		}
+		io.Copy(ret, pw.Buffer)
+		ret.Close()
+		c.pendingList.Remove(e)
+	}
+	c.writerLocker.Unlock()
+	return nil
 }
 
 func (c *serverConn) Close() error {
@@ -241,6 +292,7 @@ func (c *serverConn) OnPacket(r *parser.PacketDecoder) {
 		r.Close()
 	case parser.UPGRADE:
 		c.upgraded()
+		c.clearPendingWriter()
 	case parser.NOOP:
 	}
 }
