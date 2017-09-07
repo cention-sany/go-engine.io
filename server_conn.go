@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/googollee/go-engine.io/message"
@@ -67,19 +66,20 @@ const (
 
 type pendingWriter struct {
 	*bytes.Buffer
-	t       MessageType
-	canRead atomic.Value
+	t      MessageType
+	closed chan struct{}
 }
 
 func newPendingWriter(t MessageType) *pendingWriter {
 	return &pendingWriter{
 		Buffer: new(bytes.Buffer),
 		t:      t,
+		closed: make(chan struct{}),
 	}
 }
 
 func (p *pendingWriter) Close() error {
-	p.canRead.Store(true)
+	close(p.closed)
 	return nil
 }
 
@@ -100,6 +100,7 @@ type serverConn struct {
 	pingInterval    time.Duration
 	pingChan        chan bool
 	pendingList     *list.List
+	closed          chan struct{}
 }
 
 var InvalidError = errors.New("invalid transport")
@@ -119,6 +120,7 @@ func newServerConn(id string, w http.ResponseWriter, r *http.Request, callback s
 		pingTimeout:  callback.configure().PingTimeout,
 		pingInterval: callback.configure().PingInterval,
 		pingChan:     make(chan bool),
+		closed:       make(chan struct{}),
 	}
 	transport, err := creater.Server(w, r, ret)
 	if err != nil {
@@ -192,7 +194,7 @@ func (c *serverConn) NextWriter(t MessageType) (io.WriteCloser, error) {
 	return writer, err
 }
 
-func (c *serverConn) clearPendingWriter() error {
+func (c *serverConn) clearPendingWriter(done <-chan struct{}) error {
 	c.writerLocker.Lock()
 	if c.pendingList == nil || c.pendingList.Len() <= 0 {
 		c.writerLocker.Unlock()
@@ -201,8 +203,11 @@ func (c *serverConn) clearPendingWriter() error {
 	ct := c.getCurrent()
 	for e := c.pendingList.Front(); e != nil; e = c.pendingList.Front() {
 		pw, _ := e.Value.(*pendingWriter)
-		if v := pw.canRead.Load(); v == nil {
-			continue
+		select {
+		case <-pw.closed:
+		case <-done:
+			c.writerLocker.Unlock()
+			return errors.New("engineio: clear pending force shutdown")
 		}
 		ret, err := ct.NextWriter(message.MessageType(pw.t), parser.MESSAGE)
 		if err != nil {
@@ -292,7 +297,7 @@ func (c *serverConn) OnPacket(r *parser.PacketDecoder) {
 		r.Close()
 	case parser.UPGRADE:
 		c.upgraded()
-		c.clearPendingWriter()
+		c.clearPendingWriter(c.closed)
 	case parser.NOOP:
 	}
 }
@@ -313,6 +318,7 @@ func (c *serverConn) OnClose(server transport.Server) {
 		c.setUpgrading("", nil)
 	}
 	c.setState(stateClosed)
+	close(c.closed)
 	close(c.readerChan)
 	close(c.pingChan)
 	c.callback.onClose(c.id)

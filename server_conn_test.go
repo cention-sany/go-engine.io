@@ -441,6 +441,10 @@ func TestConnUpgrade(t *testing.T) {
 			So(err, ShouldBeNil)
 			wrc.Close()
 
+			// second write while upgrading but not complete yet
+			wrc, err = conn.NextWriter(MessageBinary)
+			So(err, ShouldBeNil)
+
 			encoder, err := wc.NextWriter(message.MessageBinary, parser.PING)
 			So(err, ShouldBeNil)
 			encoder.Write([]byte("probe"))
@@ -459,10 +463,22 @@ func TestConnUpgrade(t *testing.T) {
 			So(err, ShouldBeNil)
 			encoder.Close()
 
+			// let packet.Upgrade get receive by server_conn
+			time.Sleep(time.Millisecond)
+			// second write complete only after upgrade packet
+			wrc.Close()
+
 			decoder, err = wc.NextReader()
 			So(err, ShouldBeNil)
 			So(pc.Response().StatusCode, ShouldEqual, http.StatusOK)
 			So(decoder.MessageType(), ShouldEqual, message.MessageText)
+			So(decoder.Type(), ShouldEqual, parser.MESSAGE)
+
+			// second write should still be received in same sequence
+			decoder, err = wc.NextReader()
+			So(err, ShouldBeNil)
+			So(pc.Response().StatusCode, ShouldEqual, http.StatusOK)
+			So(decoder.MessageType(), ShouldEqual, message.MessageBinary)
 			So(decoder.Type(), ShouldEqual, parser.MESSAGE)
 
 			decoder, err = wc.NextReader()
